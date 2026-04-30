@@ -13,7 +13,7 @@ nui-trace parser — consumes Xenia logs produced with --nui_telemetry and emits
 
 Input lines look like (xenia XELOGI prefix is tolerated, not required):
 
-    i> 00001234 [nui] XamNuiGetDeviceStatus(status_ptr=82A40C00)
+    i> F8000008 [nui] XamNuiGetDeviceStatus(status_ptr=7018F680)
     [nui] XamIsNuiUIActive()
 
 Lines that do not contain the literal "[nui] " token are ignored, so it is
@@ -47,13 +47,13 @@ def iter_calls(path: Path) -> Iterator[str]:
                 yield m.group(1)
 
 
-def collect(path: Path) -> tuple[list[str], Counter[str]]:
+def collect(path: Path):
     """Return (ordered call list, frequency counter) for a trace file."""
-    calls: list[str] = list(iter_calls(path))
+    calls = list(iter_calls(path))
     return calls, Counter(calls)
 
 
-def write_summary(out: Path, counter: Counter[str], label: str) -> None:
+def write_summary(out: Path, counter: Counter, label: str) -> None:
     total = sum(counter.values())
     unique = len(counter)
     width = max((len(name) for name in counter), default=10)
@@ -88,13 +88,8 @@ def write_init_sequence(out: Path, calls: Iterable[str], limit: int,
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_mermaid(out: Path, calls: list[str], limit: int, label: str) -> None:
-    """Mermaid sequenceDiagram of the first `limit` calls (not unique).
-
-    Title is the actor that calls into XAM. Lines are flattened to
-    `Title->>XAM: FuncName` so the diagram is readable when pasted into a
-    GitHub comment.
-    """
+def write_mermaid(out: Path, calls, limit: int, label: str) -> None:
+    """Mermaid sequenceDiagram of the first `limit` calls (not unique)."""
     chunk = calls[:limit]
     lines = [
         f"# Mermaid sequence — {label}",
@@ -113,7 +108,7 @@ def write_mermaid(out: Path, calls: list[str], limit: int, label: str) -> None:
 
 
 def write_diff(out: Path,
-               counter_a: Counter[str], counter_b: Counter[str],
+               counter_a: Counter, counter_b: Counter,
                label_a: str, label_b: str) -> None:
     """Symmetric diff: only-in-A, only-in-B, count delta for shared names."""
     keys_a = set(counter_a)
@@ -122,7 +117,7 @@ def write_diff(out: Path,
     only_b = sorted(keys_b - keys_a)
     shared = sorted(keys_a & keys_b)
 
-    lines: list[str] = [
+    lines = [
         f"# nui-trace diff — {label_a}  vs  {label_b}",
         f"# {label_a}: {sum(counter_a.values())} calls / "
         f"{len(counter_a)} unique",
@@ -163,7 +158,7 @@ def write_diff(out: Path,
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="nui-trace parser",
         description="Parse xenia --nui_telemetry logs into reports.",
@@ -210,7 +205,6 @@ def main(argv: list[str] | None = None) -> int:
         if not calls_b:
             print(f"warning: no [nui] lines found in {args.trace_b}",
                   file=sys.stderr)
-        # Append B-side reports next to A-side, suffixed.
         write_summary(args.out_dir / f"summary_{label_b}.txt",
                       counter_b, label_b)
         write_init_sequence(args.out_dir / f"init_sequence_{label_b}.txt",
