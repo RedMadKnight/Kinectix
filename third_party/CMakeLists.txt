@@ -384,6 +384,43 @@ if(WIN32)
 endif()
 
 # ==============================================================================
+# libfreenect (Kinect v1 driver — Stage 4 NUI backend, Windows-only for now)
+# ==============================================================================
+# Inline wrapper around vendored OpenKinect/libfreenect. We do NOT call
+# add_subdirectory on libfreenect's own CMakeLists.txt — its FindLibUSB and
+# FindThreads modules clash with our setup. Instead we mirror the SRC list
+# from libfreenect/src/CMakeLists.txt and link against our existing libusb
+# static target. Pin: 09a1f09 (2024-01-06).
+if(WIN32)
+  set(_freenect_root "${CMAKE_CURRENT_SOURCE_DIR}/libfreenect")
+  add_library(freenect STATIC
+    ${_freenect_root}/src/core.c
+    ${_freenect_root}/src/tilt.c
+    ${_freenect_root}/src/cameras.c
+    ${_freenect_root}/src/flags.c
+    ${_freenect_root}/src/usb_libusb10.c
+    ${_freenect_root}/src/registration.c
+    ${_freenect_root}/src/audio.c
+    ${_freenect_root}/src/loader.c
+  )
+  target_include_directories(freenect PUBLIC
+    ${_freenect_root}/include
+  )
+  target_include_directories(freenect PRIVATE
+    # MSVC has no <unistd.h>. We ship a minimal shim (usleep/sleep only) and
+    # put its directory FIRST so #include <unistd.h> resolves to our header
+    # before the compiler errors out. See freenect-msvc-compat/unistd.h for
+    # rationale and which call sites we cover.
+    ${CMAKE_CURRENT_SOURCE_DIR}/freenect-msvc-compat
+    ${_freenect_root}/src
+  )
+  target_link_libraries(freenect PUBLIC libusb)
+  # libfreenect uses C99 designated initializers and bitfield tricks that
+  # MSVC accepts but emits noisy warnings for. /W0 inherited from directory
+  # scope already suppresses these — leave as-is.
+endif()
+
+# ==============================================================================
 # SDL2
 # ==============================================================================
 if(WIN32)
