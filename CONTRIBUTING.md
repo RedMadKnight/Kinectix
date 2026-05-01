@@ -7,10 +7,13 @@
 - `src/xenia/hid/nui/**`
 - `src/xenia/kernel/xam/xam_nui.cc`
 - `src/xenia/kernel/xam/xam_nui.h`
+- `src/xenia/kernel/xam/apps/xam_app.cc` — only the NUI-related case stubs (e.g. `XamUnk2B001`)
+- `third_party/libfreenect/**` (submodule pointer + our wrapper rules)
+- `third_party/freenect-msvc-compat/**` (POSIX shim for libfreenect on MSVC)
 - `.github/**`
 - top-level `*.md` (docs)
-- `tools/nui_*` (recorder, fixture utilities)
-- premake / CMake additions for NUI build flags only
+- `tools/nui-trace/**` (telemetry parser)
+- CMake additions for NUI targets only (`add_subdirectory(hid/nui)`, `target_link_libraries(... xenia-hid-nui)`, the inline `freenect` STATIC target in `third_party/CMakeLists.txt`)
 
 Anything else — GPU fixes, kernel bugs, audio, controller — belongs in [xenia-canary](https://github.com/xenia-canary/xenia-canary). We will happily help you draft that PR, but Kinectix does not carry private divergence outside its scope. Every byte of drift is rebase pain when we sync from upstream.
 
@@ -42,40 +45,48 @@ GPU: Fix incorrect tile size in resolve path
 ## Branch model
 
 - `canary` — automated mirror of `xenia-canary/xenia-canary`'s `canary_experimental` branch. Do not push directly.
-- `main` — protected. PRs only. Rebased on `canary` weekly by `.github/workflows/canary-sync.yml`.
-- `feature/nui-<short-name>` — your working branch. PR'd to `main`.
+- `main` — protected (linear history, lint+build status checks required). PRs only. Rebased on `canary` weekly by `.github/workflows/canary-sync.yml`.
+- Working branches — name freely (e.g. `stage4-m2-libfreenect-vendor`, `nui-fix-skeleton-broadcast`). PR'd to `main`.
 
-Note: the `upstream` name in this repo refers to the **remote** pointing at `xenia-canary/xenia-canary` (used for `git fetch upstream`), not a branch. The mirror branch is `canary`.
+Note: the `upstream` name in this repo refers to the **remote** pointing at `xenia-canary/xenia-canary` (used for `git fetch upstream`), not a branch. The mirror branch is `canary`. **Never name a local branch `upstream`** — it conflicts with the remote namespace.
 
 If you fork from `main` and the weekly canary rebase happens before your PR merges, you'll need to rebase your branch. This is normal. Keep features small to minimize the pain.
 
 ## Code style
 
-We inherit xenia's style guide verbatim — see [xenia-canary's style notes](https://github.com/xenia-canary/xenia-canary/blob/canary_experimental/docs). Run clang-format with the project's `.clang-format` before opening a PR. PRs that don't format-clean will get a comment, not a close.
+We inherit xenia's style guide verbatim. Run **clang-format version 20.1.7 specifically** with the project's `.clang-format` before opening a PR — CI's lint job rejects any other version's output, even patch-level differences:
+
+```cmd
+pip install clang-format==20.1.7 --break-system-packages
+clang-format --style=file -n -Werror <changed-files>
+clang-format --style=file -i <changed-files>   # auto-fix
+```
+
+PRs that don't format-clean will get a CI red, not a close — fix and push.
 
 ## Tests
 
-Every PR that changes behavior must ship one of:
+Stage 4 is feature-development phase, and our test infrastructure is still being built up. For now, behavioral changes must demonstrate correctness via at least one of:
 
-- A unit test in `src/xenia/hid/nui/tests/` exercising the new path.
-- A `.xnuirec` fixture in `tests/fixtures/` plus a regression test that loads it and asserts on observed XAM NUI output.
-- Both, ideally.
+- **Telemetry trace** captured via `--nui_telemetry`, parsed with `tools/nui-trace/parser.py`, attached to the PR. Required for any change that affects which XAM NUI exports get called or in what order (`xam_nui.cc`, `NuiManager`, backend implementations of `Poll*`).
+- **Reference-title screenshot or short video** demonstrating the change in a Kinect title (Kinect Adventures bootstrap is the canonical smoke test). Required for any change with visible UI/runtime effect.
+- **Unit test** under `src/xenia/hid/nui/tests/` (directory not yet populated — first contributor here is welcome to seed it). Required for self-contained logic like joint mapping math.
 
-We treat the recorded backend as our reference oracle: a `.xnuirec` fixture captured from a real Kinect, replayed through the recorded backend, must produce the same XAM NUI guest-side state every run on every host. CI runs the full fixture suite on every push.
+The recorded backend (Stage 3) was our originally planned regression oracle — that approach is deprioritized while we focus on real Kinect support. CI will gain a fixture replay suite post-Stage-4 if useful.
 
-If your change touches a backend that requires hardware (libfreenect, libfreenect2, MediaPipe), you must additionally:
+If your change touches the libfreenect backend (Stage 4+), additionally:
 
-1. Document the manual test in the PR description ("ran with Kinect v1 against Kinect Adventures, walked the menu, captured `kinect_adventures_menu.xnuirec`").
-2. Attach the `.xnuirec` capture as a CI fixture if it's small enough.
+1. Document the manual test in the PR description (e.g. "ran with Kinect 1473 + libusbK driver against Kinect Adventures, observed `freenect-camtest.exe`-equivalent depth+color stream").
+2. Mention any deviation from the canonical hardware setup documented in [README.md § Hardware & driver requirements](README.md).
 
 ## Bringing in a new backend
 
 If you want to add a new `INuiBackend` (say, OpenXR body tracking, or VR trackers):
 
 1. Open a discussion issue first. Backend additions expand our maintenance surface; we want to agree on it before code.
-2. The backend must be optional, gated by a build flag (`KINECTIX_NUI_<NAME>=ON|OFF`).
-3. The default build with no flags must still link and produce a working binary that uses the recorded backend.
-4. The backend cannot pull in dependencies that change xenia-canary's build assumptions (no new global LDFLAGS, no replacing CRTs, etc.).
+2. The backend must be selectable via `--nui_backend=<your-backend>` cvar — runtime, not compile-time. Inactive backends are dead code in the binary but contribute negligibly to size; we deliberately avoid `KINECTIX_NUI_*` build flags so contributors get a uniform build.
+3. The default `--nui_backend=none` (null backend) must keep working — backend init failure must not break non-Kinect titles.
+4. The backend cannot pull in dependencies that change xenia-canary's build assumptions (no new global LDFLAGS, no replacing CRTs, etc.). Vendor heavy deps as `third_party/<lib>` submodules and inline-wrap them in `third_party/CMakeLists.txt`, following the libfreenect pattern.
 
 ## Branding and trademarks
 

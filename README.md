@@ -31,11 +31,18 @@ Kinectix takes ownership of that scope. We track xenia-canary upstream weekly, c
 
 | Stage | Description | Status |
 |------|-------------|--------|
-| 0 | Telemetry: log all `xam_nui.*` syscalls from reference titles | not started |
-| 1 | `INuiBackend` + recorded playback (`.xnuirec` files) | not started |
-| 2 | libfreenect backend (Kinect v1, build-flag) | blocked by Stage 1 |
-| 2b | libfreenect2 backend (Kinect v2 via USB 3.0 adapter) | blocked by Stage 1 |
-| 3 | Webcam + MediaPipe pose estimation backend | optional, post Stage 2 |
+| 0 | Project scaffolding (docs, CI, branch model, weekly canary-sync) | done |
+| 1 | `INuiBackend` interface + null backend wired into CMake | done |
+| 2 | XAM NUI telemetry tracer (`--nui_telemetry`, all 28 exports) | done — tag `v0.0.2-telemetry` |
+| 2.5 | Bootstrap unblock: `XN_SYS_NUI_HARDWARESTATUSCHANGED` broadcast + `XamUnk2B001` stub | done |
+| 3 | Recorded backend (`.xnuirec` files via flatbuffers) | deprioritized — real Kinect available |
+| 4 M1.5 | Hardware sanity: `freenect-camtest.exe` reads frames from Kinect 1473 via libusbK | done |
+| 4 M2 | Backend scaffold: `third_party/libfreenect` submodule + `src/xenia/hid/nui/freenect/` | in progress |
+| 4 M3 | Real depth + color frame capture, threaded reader | pending |
+| 4 M4 | Fake T-pose skeleton stub via `XamNuiSkeletonGet*` | pending |
+| 4 M5 | Notification broadcast: `kXNotificationSystemNUISkeletonTrackingStatusChanged` | pending |
+| 4 M6 | First end-to-end: Kinect Adventures clears "is anybody there?" → main menu | pending |
+| 5 | Real skeleton tracking (NiTE2 / MediaPipe Pose / custom ML) — decision post-M6 | pending |
 
 See [ROADMAP.md](ROADMAP.md) for stage detail.
 
@@ -58,35 +65,53 @@ Validation targets, in priority order:
 
 **Rule:** any commit touching files outside `src/xenia/hid/nui/`, `src/xenia/kernel/xam/xam_nui.cc`, `.github/`, and top-level docs must be a bug fix. Bug fixes get cherry-picked into a PR against `xenia-canary` upstream within a week. We don't carry private divergence; it is rebase poison.
 
+## Hardware & driver requirements
+
+Required to actually exercise the NUI emulation path with real hardware (M1.5+):
+
+- **Kinect for Xbox 360, model 1473** (the bottom-of-base sticker number). Model 1414 has a known USB enumeration loop on Windows 11 (LED blinks continuously, suspected xHCI quirk) — skip 1414.
+- **USB power adapter** for the Kinect — the Xbox 360 console connector does not work standalone.
+- **Windows 11 host with libusbK driver bound via [Zadig](https://zadig.akeo.ie/)**. Microsoft Kinect SDK 1.8 is not compatible with Windows 11 (`kinectcamera.sys`'s WDF coinstaller refuses to load — Code 39 + "Bad Image"). We use libfreenect over libusbK instead. Trade-off: lose MS skeleton tracking out-of-the-box; we provide our own (Stage 5).
+- **Visual Studio 2026** with Desktop development with C++ workload, **CMake 3.20+**, **clang-format 20.1.7** (CI is strict on this exact version).
+
+A `none` (null) backend builds and runs without any of the above — useful for telemetry capture (Stage 2) and for working on non-hardware code paths.
+
 ## Building
 
-Same toolchain as xenia-canary. See [BUILDING.md](BUILDING.md) (TODO — inherits from upstream).
+xenia-canary uses **CMake** (not premake — the upstream `xb` premake wrapper is being phased out).
 
-```bash
-git clone https://github.com/<your-org>/Kinectix
+```cmd
+git clone --recurse-submodules https://github.com/RedMadKnight/Kinectix
 cd Kinectix
-./xb premake
-./xb build
+mkdir build
+cd build
+cmake .. -G "Visual Studio 18 2026" -A x64
+cmake --build . --config Release
 ```
 
-Optional NUI backends are gated by CMake / premake flags:
+See [BUILDING.md](BUILDING.md) for full setup, including `--nui_telemetry` capture instructions and how to run the trace parser in `tools/nui-trace/`.
 
-```bash
-./xb build --define KINECTIX_NUI_FREENECT=ON
-./xb build --define KINECTIX_NUI_FREENECT2=ON
-./xb build --define KINECTIX_NUI_MEDIAPIPE=ON
+NUI backend is selected at runtime via the `--nui_backend` cvar:
+
+```
+--nui_backend=none      (default — null backend, no Kinect input)
+--nui_backend=recorded  (replay a .xnuirec fixture, Stage 3 deprioritized)
+--nui_backend=freenect  (libfreenect / Kinect v1, Stage 4)
+--nui_backend=freenect2 (Kinect v2, future)
+--nui_backend=mediapipe (webcam pose estimation, Stage 5 candidate)
 ```
 
-Default backend is `recorded` (no external dependencies).
+There are no compile-time backend flags. All vendored dependencies (libfreenect, libusb) are git submodules under `third_party/` and build automatically.
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). The short version:
 
-- Stay inside `src/xenia/hid/nui/` and `xam_nui.cc` unless you're fixing a bug we'll send upstream.
-- Prefix NUI commits with `[nui]`.
+- Stay inside `src/xenia/hid/nui/`, `src/xenia/kernel/xam/xam_nui.cc`, and tooling under `tools/nui-trace/` unless you're fixing a bug we'll cherry-pick upstream.
+- Prefix NUI commits with `[nui]`; infra/build commits with `[infra]`.
 - Do not use Xenia branding in PRs, screenshots, or release artifacts.
-- All PRs must include either a unit test or a `.xnuirec` fixture demonstrating behavior.
+- Run `clang-format --style=file -n -Werror <files>` (version **20.1.7** specifically) before pushing — CI lint is strict.
+- For behavioral changes, attach either a captured trace from `tools/nui-trace/parser.py` (showing the affected XAM NUI calls) or, where applicable, before/after screenshots from a reference title.
 
 ## License
 

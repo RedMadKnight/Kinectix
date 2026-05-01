@@ -1,62 +1,69 @@
 # Building Kinectix
 
-The build process is **identical to upstream xenia-canary** — same `xb` script, same toolchain, same dependencies. See [`docs/building.md`](docs/building.md) (inherited from upstream) for the full setup.
+Kinectix uses **CMake**. The upstream `xb` premake wrapper from xenia-canary is being phased out — don't use it. Build directly with CMake.
 
-This file documents only the **Kinectix-specific** additions on top of that.
+## Quickstart (Windows)
 
-## Quickstart (assumes you already have an xenia-canary build environment)
-
-```bash
-git clone https://github.com/RedMadKnight/Kinectix.git
+```cmd
+git clone --recurse-submodules https://github.com/RedMadKnight/Kinectix.git
 cd Kinectix
-./xb premake
-./xb build
+mkdir build
+cd build
+cmake .. -G "Visual Studio 18 2026" -A x64
+cmake --build . --config Release
 ```
 
-Output binaries land in the same place upstream puts them: `build/bin/<config>/`.
+Output binaries land in `build/bin/Windows/Release/xenia.exe` (the upstream binary name is preserved inside the build for compatibility; releases are distributed as `kinectix-*.zip`).
 
-## Toolchain summary (Linux)
+## Toolchain — Windows (primary platform)
+
+- **Visual Studio 2026 Community / Professional / Enterprise** with the **Desktop development with C++** workload. Without that workload CMake will see the `Visual Studio 18 2026` generator in `--help` but fail at configure with "could not find any instance". Sanity check: `where cl` should resolve.
+- **Windows 11 SDK** (any modern revision; we target Windows 10.0.22621.0+).
+- **CMake 3.20+** (bundled with VS, or install separately).
+- **Python 3.10+** for shader compilation scripts and `tools/nui-trace/parser.py`.
+- **clang-format 20.1.7** specifically — CI lint rejects any other version's output:
+  ```cmd
+  pip install clang-format==20.1.7 --break-system-packages
+  clang-format --version   :: must report 20.1.7
+  ```
+- **Git for Windows** with submodule support.
+
+For exercising the libfreenect backend with real hardware, see also [README.md § Hardware & driver requirements](README.md) — Kinect 1473, USB power adapter, libusbK driver via Zadig, MS Kinect SDK 1.8 must NOT be installed (incompatible with Win 11).
+
+## Toolchain — Linux (default backend only, currently)
+
+The libfreenect backend is Windows-gated for now (Stage 4 M2 onward). On Linux you can still build the null backend and the telemetry tracer:
 
 ```bash
-sudo apt install -y build-essential clang-format-20 git curl python3
+sudo apt install -y build-essential cmake git curl python3 clang-format-20
+git clone --recurse-submodules https://github.com/RedMadKnight/Kinectix.git
+cd Kinectix
+cmake -S . -B build -G Ninja
+cmake --build build --config Release
 ```
 
-## Toolchain summary (Windows)
+Linux/macOS hardware support arrives post-Stage-5.
 
-- **Visual Studio 2022** with the "Desktop development with C++" workload
-- **Windows 10 SDK 10.0.22621.0** or newer
-- **Python 3.10+**
-- **Git for Windows** (Git Bash recommended for our docs' shell snippets)
+## NUI backend selection
 
-## NUI build flags
-
-Kinectix adds optional backend flags. **None are required** — a default `xb build` produces a working binary that uses the no-op null backend. NUI code does not affect non-NUI titles.
-
-| Flag | Default | Effect | External requirement |
-|------|---------|--------|----------------------|
-| `KINECTIX_NUI_FREENECT` | OFF | Builds the libfreenect (Kinect v1) backend | `libfreenect-dev` (Linux) / libfreenect from source (Windows) |
-| `KINECTIX_NUI_FREENECT2` | OFF | Builds the libfreenect2 (Kinect v2) backend | `libfreenect2-dev` |
-| `KINECTIX_NUI_MEDIAPIPE` | OFF | Builds the webcam + MediaPipe pose backend | `mediapipe`, `opencv` |
-
-To enable a flag at CMake configure time:
-
-```bash
-cmake -S . -B build -DKINECTIX_NUI_FREENECT=ON
-cmake --build build
-```
-
-(Or, via xenia-canary's `xb` wrapper which forwards `-D` to CMake under the hood.)
-
-The recorded backend (replay from `.xnuirec` files) is **always built** and requires no external dependencies.
-
-## Runtime flags
+There are **no compile-time NUI build flags** in Kinectix. Backend is selected at runtime:
 
 ```
---nui_backend=none|recorded|freenect|freenect2|mediapipe   (default: none)
---nui_record_path=<path-to-.xnuirec>                       (only for recorded backend)
+--nui_backend=none      (default — null backend, no Kinect input)
+--nui_backend=recorded  (replay a .xnuirec fixture; Stage 3 deprioritized, reader is a stub)
+--nui_backend=freenect  (libfreenect over libusbK, Kinect v1 — Stage 4 M2 onward)
+--nui_backend=freenect2 (Kinect v2, future)
+--nui_backend=mediapipe (webcam + pose estimation, Stage 5 candidate)
+--nui_record_path=<path-to-.xnuirec>   (only for --nui_backend=recorded)
 ```
 
-A backend selected via `--nui_backend` that wasn't built into this binary falls back to `none` with a warning in the log; it is not a fatal error.
+A backend selected via `--nui_backend` that wasn't compiled into this binary (e.g. selecting `freenect` on a Linux build) falls back to `none` with a warning; it is not a fatal error.
+
+All vendored dependencies (libfreenect, libusb, freenect-msvc-compat shim) live as git submodules under `third_party/`. `git clone --recurse-submodules` pulls everything; if you cloned without that flag, run:
+
+```cmd
+git submodule update --init --recursive
+```
 
 ## Telemetry — capturing real Kinect title call sequences
 
@@ -89,21 +96,36 @@ Note that `XamIsNuiAutomationEnabled` and `XamIsNatalPlaybackEnabled` are tagged
 
 ## Build status of the NUI tree
 
-As of the Stage 1 wiring commit, `xenia-hid-nui` is built and linked into `xenia-app` on every configuration. At default settings (`--nui_backend=none`) the null backend is installed, exposing no Kinect to the guest, matching upstream behavior.
+As of Stage 4 M2:
 
-`recorded_backend.cc` is built but uses a stub `XnuirecReader` — `Open()` always returns false. The real implementation requires flatbuffer codegen from `xnuirec.fbs`, which is a follow-up. Until then, `--nui_backend=recorded` reports the backend as disconnected at runtime.
-
-`KINECTIX_NUI_FREENECT`, `KINECTIX_NUI_FREENECT2`, `KINECTIX_NUI_MEDIAPIPE` are declared as CMake options but enabling them currently only sets `XE_KINECTIX_NUI_*=1` defines and prints a STATUS message. Backend sources land in Stage 2/3.
+- `xenia-hid-nui` library is built and linked into `xenia-app` on every configuration. At default settings (`--nui_backend=none`) the null backend is installed, exposing no Kinect to the guest, matching upstream behavior.
+- `recorded_backend.cc` is built but uses a stub `XnuirecReader` — `Open()` always returns false. The recorded backend is parked while real Kinect support is the priority.
+- The `freenect` static library target is built unconditionally on Windows (links against the vendored `libusb` static target). The `xenia-hid-nui-freenect` backend module lands incrementally in Stage 4 M2 — see [ROADMAP.md](ROADMAP.md).
 
 ## Common build issues
 
-- **Lint failures on PR:** the `Lint` CI job runs `clang-format-20` on every C/C++ file. If your PR has formatting drift, run `./xb format --all` locally and commit the result. **Always use clang-format version 20 specifically** — minor versions of clang-format produce different output, and we don't want CI bouncing PRs that look fine to a contributor with a different version installed.
-- **CMake errors mentioning `KINECTIX_NUI_*`:** the flag is gated on the option being declared; if you copy the build line from somewhere old, double-check the option name matches `src/xenia/hid/nui/CMakeLists.txt`.
-- **`xenia-hid-nui` link errors:** Stage 1 wired this library into `xenia-app` via `src/xenia/CMakeLists.txt` and `src/xenia/app/CMakeLists.txt`. If you hit unresolved symbols here on a fresh checkout, regenerate your build directory.
+- **Lint failures on PR.** The `Lint` CI job runs `clang-format-20.1.7` against every changed file (`git-clang-format --commit=origin/canary_experimental --diff`). If your PR has formatting drift:
+  ```cmd
+  clang-format --style=file -i <changed-files>
+  git diff
+  ```
+  **Always use clang-format 20.1.7 specifically.** Patch versions diverge.
+- **CMake configure: "could not find any instance" of Visual Studio 2026.** The "Desktop development with C++" workload is missing or the install is incomplete. Open Visual Studio Installer → Repair on the Community 2026 entry. Verify with:
+  ```cmd
+  "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -all -prerelease -property isComplete
+  ```
+  Should return `1`. If `vswhere` reports `isComplete: false`, run Repair and wait for it to finish before retrying configure.
+- **CMake configure cache locks the generator.** Switching generator string (e.g. between `Visual Studio 18 2026` and `Ninja`) requires a clean build directory:
+  ```cmd
+  rmdir /S /Q build && mkdir build && cd build
+  cmake .. -G "<new generator>" -A x64
+  ```
+- **`unistd.h: No such file or directory` when building `freenect`.** libfreenect upstream includes POSIX headers unconditionally. Our `third_party/freenect-msvc-compat/unistd.h` shim should be on the include path automatically (set in `third_party/CMakeLists.txt`'s `freenect` target). If you see this error on a fresh checkout, verify the submodule is initialized: `git submodule status third_party/libfreenect`.
+- **`xenia-hid-nui` link errors.** Stage 1 wired this library into `xenia-app` via `src/xenia/CMakeLists.txt` and `src/xenia/app/CMakeLists.txt`. If you hit unresolved symbols here on a fresh checkout, regenerate your build directory.
 
 ## How Kinectix differs from running stock xenia-canary
 
-As of Stage 1, Kinectix builds produce a binary that is **functionally identical** to xenia-canary's at default settings — Kinect titles still report "no Kinect" and behave exactly as they do under upstream. The differences live behind cvars (`--nui_backend`, `--nui_telemetry`).
+At default settings (`--nui_backend=none`) Kinectix is **functionally identical** to xenia-canary — Kinect titles still report "no Kinect" and behave exactly as they do under upstream. The differences live behind cvars (`--nui_backend`, `--nui_telemetry`) and the Stage 2.5 bootstrap fixes for Kinect Adventures (broadcast `XN_SYS_NUI_HARDWARESTATUSCHANGED` + `XamUnk2B001` stub) — those are no-ops for non-Kinect titles.
 
 The only visible runtime difference at default settings is one extra log line at startup:
 
@@ -111,4 +133,4 @@ The only visible runtime difference at default settings is one extra log line at
 i> NUI: kinectix: backend=null connected=no caps=0x0
 ```
 
-…meaning the no-op backend is installed and Kinect-using titles still see no sensor — same as before. To get different behavior, pass `--nui_backend=recorded --nui_record_path=...` and a fixture file.
+…meaning the no-op backend is installed and Kinect-using titles still see no sensor — same as upstream. To exercise the real Kinect path, configure hardware per [README.md § Hardware & driver requirements](README.md) and pass `--nui_backend=freenect` (Stage 4 M2 onward).

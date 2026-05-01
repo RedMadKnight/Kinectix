@@ -1,109 +1,105 @@
 # Roadmap
 
-A staged plan from "fork exists, nothing works" to "shipped Kinect support". Each stage is sized so a single contributor can ship it in 1–3 weeks of focused work.
+A staged plan from "fork exists, nothing works" to "shipped Kinect support". This document is updated as stages land — see [README.md § Status](README.md#status) for the running status table.
 
-## Stage 0 — Telemetry (1 week)
+## Stage 0 — Project scaffolding ✅ DONE
 
-**Goal:** know exactly which XAM NUI functions reference titles call, in what order, with what arguments.
+Docs (README, ARCHITECTURE, ROADMAP, CONTRIBUTING, STRUCTURE, BUILDING), CI workflows (lint, build-windows, canary-sync, orchestrator), branch model (`main` ↔ `canary` mirror), repo on GitHub at [RedMadKnight/Kinectix](https://github.com/RedMadKnight/Kinectix). Branch protection on `main`: PR + status checks + linear history.
 
-**Tasks:**
+## Stage 1 — INuiBackend wiring ✅ DONE
 
-- Patch `xam_nui.cc` to log every entry: function name, ordinal, argument bytes, calling thread, current frame.
-- Run the five reference titles (Kinect Adventures, Fruit Ninja Kinect, Kinect Sports, Dance Central, Kinect Fun Lab) for ~5 minutes each. Drive past the splash screen, into menus, into one round of gameplay if possible (will likely not get past the "no Kinect detected" check — that's fine, we want to see the detection path).
-- Aggregate logs into `docs/telemetry/<title>.csv`: function, call count, top argument signatures.
+Landed `INuiBackend` interface (`nui_backend.h`), `NuiManager` singleton, null backend (`hid/nui/null/`), recorded backend stub (`hid/nui/recorded/` — `XnuirecReader::Open()` always returns false, kept compiled for ABI completeness). Wired `xenia-hid-nui` library into `xenia-app` via `src/xenia/CMakeLists.txt` and `src/xenia/app/CMakeLists.txt`. Default `--nui_backend=none` produces a binary functionally identical to upstream xenia-canary at default settings.
 
-**Deliverable:** a single document (`docs/XAM_NUI_API_OBSERVED.md`) listing every function we've seen called, sorted by call frequency. This is the spec we implement against.
+## Stage 2 — XAM NUI telemetry ✅ DONE — tag `v0.0.2-telemetry`
 
-**Why first:** every current proposal for Kinect emulation has been written from theoretical knowledge of XAM. We don't have empirical data on what the games actually use. This stage produces it. Without it, every interface guess we make is a coin flip.
+Patched `src/xenia/kernel/xam/xam_nui.cc` with `XE_NUI_TRACE` macro on all 28 XAM NUI exports. Cvar `--nui_telemetry` (default off) gates the trace; cost when off is one global-bool load + branch (predicted not-taken via `XE_UNLIKELY`). Trace lines emit through `XELOGI` as `i> [nui] FunctionName(arg=value, …)`. Parser tool at `tools/nui-trace/parser.py` analyzes captured logs (summary, init sequence, A/B diff, mermaid sequence diagram).
 
-**Risk:** games may bail out of NUI initialization so early that we see only 3–4 calls before they give up. Mitigation: implement minimum-viable stub responses (return success, return capabilities-supported flags) iteratively, re-run, capture the next batch of calls. Three iterations should peel back to actual gameplay.
+Empirical findings against Kinect Adventures: titles call only `XamNuiGetDeviceStatus` (1×) + `XamShowNuiTroubleshooterUI` (per X button press) at the bootstrap screen. The "is anybody there?" gate enforces `XEX_SYSTEM_SKELETAL_TRACKING_REQUIRED` — no controller fallback for these titles, real (or simulated) skeleton tracking is mandatory.
 
-## Stage 1 — Recorded backend + INuiBackend (2 weeks)
+## Stage 2.5 — Bootstrap unblock ✅ DONE — PR #5
 
-**Goal:** any contributor can run a reference title against a `.xnuirec` fixture and see motion gameplay on screen.
+Two missing kernel-side calls that Kinect Adventures gates on:
 
-**Tasks:**
+- Broadcast `XN_SYS_NUI_HARDWARESTATUSCHANGED` notification on first `XamNuiGetDeviceStatus`. Without it, the title never refreshes its sensor-presence cache.
+- Stub `XamUnk2B001` (XAM ordinal `0x0002B001`) in `src/xenia/kernel/xam/apps/xam_app.cc`. Title checks return value but tolerates simple success.
 
-- Land `INuiBackend` interface in `src/xenia/hid/nui/nui_backend.h`.
-- Land `NuiManager` singleton.
-- Land `RecordedBackend` reading `.xnuirec` files.
-- Define and land `xnuirec.fbs` schema.
-- Write a CLI tool `tools/nui_record` (no-op stub for now; populated in Stage 2) and `tools/nui_inspect` (dumps a `.xnuirec` to console).
-- Rewrite `xam_nui.cc` based on Stage 0 telemetry. Hook into `NuiManager`.
-- Hand-author or synthesize at least one `.xnuirec` fixture (a 30-second loop of "person standing, idle pose"). This will not be visually convincing, but it will be enough to get past the initial NUI detection in games.
+Side-finding: `XamVoiceSetMicArrayIdleUsers`/`MuteMicArray`/`GetMicArrayUnderrunStatus`/`GetMicArrayAudioEx`/`DisableMicArray` (ordinals 0x48C–0x491) have entries in `xam_table.inc` but no `DECLARE_XAM_EXPORT1` declarations in `xam_voice.cc`. Title gracefully ignores NULL return — does not block. Side-PR for stubs pending.
 
-**Deliverable:** Kinect Adventures launches past the "Wave to begin" screen using a hand-authored fixture. CI runs the fixture in a regression test.
+## Stage 3 — Recorded backend ⏸ DEPRIORITIZED
 
-**Risk:** "person standing idle" may not be enough to satisfy detection — some games require an actual gesture (a wave) to advance. Mitigation: progressively richer hand-authored fixtures. Build a tiny GUI tool (or use an external blender export) to author multi-pose fixtures.
+Originally planned as our deterministic regression oracle: capture a `.xnuirec` fixture once, replay through `RecordedBackend` for CI tests. Deprioritized once we confirmed real Kinect hardware (1473) is functional locally, making real-time depth+color development feasible. The `xnuirec.fbs` schema and `XnuirecReader` skeleton remain in tree for potential CI fixture replay post-Stage-4. Pick this back up if/when CI gains the ability to mock USB hardware end-to-end.
 
-## Stage 2 — libfreenect backend (2 weeks)
+## Stage 4 — libfreenect backend (Kinect v1)
 
-**Goal:** users with a real Kinect v1 can plug it in and play.
+End-to-end goal: Kinect Adventures clears the "is anybody there?" gate and reaches the main menu, exercising the full XAM NUI ↔ `INuiBackend` ↔ libfreenect ↔ libusb path.
 
-**Tasks:**
+### M1.5 — Hardware sanity ✅ DONE 2026-05-01
 
-- Land `FreenectBackend` in `src/xenia/hid/nui/freenect/`. Build-flagged behind `KINECTIX_NUI_FREENECT=ON`, default off.
-- Vendor or `find_package` libfreenect. Document install instructions for Windows, Linux, macOS.
-- Implement skeleton tracking. **Note:** libfreenect itself does NOT do skeleton tracking — it only delivers depth + RGB + IR. We need a skeleton tracker. Three options, in order of preference:
-  - (a) Ship a minimal skeleton tracker as part of the backend. Random-forest classifier trained on the [Microsoft Kinect Body Pose Dataset](https://www.microsoft.com/en-us/research/publication/real-time-human-pose-recognition-in-parts-from-single-depth-images/) approach. **High effort, high quality.**
-  - (b) Use OpenNI 2 + NiTE 2 if we can find a license-compatible source. NiTE was Microsoft proprietary; PrimeSense's library has been forked. **Medium effort, license-questionable.**
-  - (c) Run MediaPipe Pose against the RGB stream, project to skeleton. **Low effort, lower quality, depends on MediaPipe build.**
+`freenect-camtest.exe` reads depth + color frames from Kinect 1473 via libusbK driver (Zadig-installed). Confirmed: Microsoft Kinect SDK 1.8 is incompatible with Windows 11 (`kinectcamera.sys` Code 39 + Bad Image — KMDF coinstaller mismatch). Pivoted to libfreenect over libusbK as the only viable path. Trade-off accepted: lose MS skeleton tracking out-of-the-box; we provide our own (Stage 5).
 
-  **Recommendation:** start with (c) for the v1 backend; treat (a) as a long-term project if anyone is interested. (c) gives us pixel-noisy but functional skeleton tracking with a path that already exists in Stage 3.
+Hardware: Kinect 1473 stable; 1414 has USB enumeration loop on Win 11 — skip 1414.
 
-- Populate `tools/nui_record` to capture from libfreenect into `.xnuirec`. This is the path to building our test fixture corpus from real hardware.
+### M2 — Backend scaffold 🚧 in progress
 
-**Deliverable:** `KINECTIX_NUI_FREENECT=ON` build runs Kinect Adventures end-to-end with a real Kinect plugged in. A captured `.xnuirec` from the same session replays correctly through the recorded backend.
+Vendor libfreenect at commit `09a1f09` as `third_party/libfreenect` git submodule. Inline `freenect` STATIC target in `third_party/CMakeLists.txt` mirroring upstream `src/CMakeLists.txt:23` SRC list (8 files); links against existing vendored `libusb` (no vcpkg dependency). MSVC POSIX shim at `third_party/freenect-msvc-compat/unistd.h` (usleep/sleep → Sleep). Backend module `src/xenia/hid/nui/freenect/{nui_freenect.h,.cc,CMakeLists.txt}` with minimal `Setup()/Shutdown()`. Wire `freenect` arm in `NuiManager`'s `--nui_backend` switch.
 
-**Risk:** Windows libfreenect support is fragile, especially on Windows 11. The Microsoft Kinect for Windows Runtime is deprecated and unreliable. Mitigation: prioritize Linux first; Windows users may need a `KINECTIX_NUI_KINECTSDK=ON` alternative path that uses the legacy MS SDK. Ship Linux support in this stage and treat Windows libfreenect as a follow-up.
+### M3 — Frame capture ⏳ pending
 
-## Stage 2b — libfreenect2 backend (2 weeks, parallel-able)
+Threaded reader: dedicated `std::thread` running `freenect_process_events()` loop. Lock-free triple-buffered slots for depth (320×240 11-bit, packed `uint16_t`) and color (640×480 RGB888 → BGRA). Game thread calls `Poll*()` reading the latest committed slot — no blocking on Kinect I/O. Shutdown joins the reader thread cleanly.
 
-**Goal:** users with a Kinect v2 + USB 3.0 adapter can plug it in.
+### M4 — Fake T-pose skeleton stub ⏳ pending
 
-**Tasks:**
+Hardcoded skeleton frame: 20 joints in T-pose centered at `(0, 0, 2.5m)` from sensor. Joint positions in canonical Xbox 360 NUI skeleton format (struct layout to be confirmed against Stage 0 telemetry). `XamNuiSkeletonGetNextFrame`/`XamNuiSkeletonGetBestSkeletonIndex` return this. Goal: title accepts as "skeleton tracked" → past "is anybody there?".
 
-- Land `Freenect2Backend` in `src/xenia/hid/nui/freenect/`. Build-flagged behind `KINECTIX_NUI_FREENECT2=ON`.
-- Vendor or `find_package` libfreenect2. Skeleton tracking same approach as Stage 2.
-- Map v2's 25-joint skeleton to v1's 20-joint output by dropping `Neck`, `HandTipLeft`, `HandTipRight`, `ThumbLeft`, `ThumbRight`. (`Spine` and `SpineMid` collapse to `Spine` v1 sense.)
+### M5 — Notification broadcast ⏳ pending
 
-**Risk:** USB 3.0 adapter availability is shrinking. Document this clearly; v2 support is for users who already own the adapter.
+First `XamNuiSkeletonGetNextFrame` triggers `kXNotificationSystemNUISkeletonTrackingStatusChanged` broadcast (notification ID to confirm — likely `0x0006001A` or `0x0006001B`, check `notify_listener.h`). Argument: "skeleton 0 tracked".
 
-## Stage 3 — Webcam + MediaPipe backend (optional, post Stage 2)
+### M6 — First end-to-end ⏳ pending
 
-**Goal:** users with no Kinect at all can play with reduced fidelity.
+Capture `trace_i` log with M3+M4+M5 build, run Kinect Adventures, verify "is anybody there?" → main menu transition. Compare against `trace_h` (last pre-Stage-4 capture) via `parser.py --trace-a/--trace-b`.
 
-**Tasks:**
+## Stage 5 — Real skeleton tracking ⏳ pending — decision after M6
 
-- Land `MediaPipeBackend` in `src/xenia/hid/nui/mediapipe/`. Build-flagged behind `KINECTIX_NUI_MEDIAPIPE=ON`.
-- Capture from `cv::VideoCapture` (or platform-native).
-- Run MediaPipe Pose, get 33-point body landmarks.
-- Project to Kinect v1 20-joint output. Many joints are direct mappings; some (`SpineShoulder`, `Spine`) are interpolations between MediaPipe landmarks.
-- Synthesize fake depth from monocular pose estimation. Quality will be poor; depth-using games will probably not work well. Skeleton-using games should work acceptably.
+If fake T-pose passes the bootstrap gate but doesn't get into actual gameplay (gameplay requires real gestures/poses), pick a real tracker:
 
-**Risk:** quality. We document this as "best-effort, expect glitches in dance/precision titles, fine for casual stuff".
+- **MediaPipe Pose** — least overhead, RGB-based, 33 landmarks → mapping to 20-joint Kinect skeleton. Single-person. Recommended starting point.
+- **NiTE 2** — hard to find in 2026, archived downloads only, license uncertain. Investigate but don't depend on.
+- **Custom ML** — random forest on depth (the original Microsoft 2011 approach). High effort, highest fidelity, longest runway.
 
 ## Cross-stage tracks
 
-These run alongside the staged work:
+- **Weekly canary sync.** `.github/workflows/canary-sync.yml` cron-fast-forwards `canary` branch from upstream's `canary_experimental`. Manual rebase of `main` follows. First manual run pending verification.
+- **Game compatibility tracking.** `docs/compat.md` post-Stage-4: which titles work with which backend. Kinect Adventures is the canonical smoke test.
+- **Cherry-pick non-NUI bug fixes upstream.** Per CONTRIBUTING.md scope rules — anything outside the NUI allowlist gets PR'd to xenia-canary first, cherry-picked locally.
 
-- **Game compatibility tracking.** A `compat.md` table mirroring xenia's game-compatibility repo, tracking which titles work with which backends.
-- **Documentation.** User-facing docs at `docs/getting-started.md`, separate from contributor docs in this repo root.
-- **Release cadence.** First tagged release after Stage 1 (recorded backend works, no hardware required). Second release after Stage 2 (real Kinect support).
+## Linux / macOS
+
+Stage 4 is Windows-first because:
+1. Real Kinect hardware (1473) needs libusbK driver via Zadig — Windows-only setup.
+2. Win 11 + MS SDK 1.8 incompatibility was the original blocker forcing us off the SDK path.
+3. CI Windows runners get the binary tested.
+
+Linux/macOS path: `freenect` target is currently `if(WIN32)`-gated. Lifting that gate requires:
+- Making `libusb` build on non-Windows (already supported upstream, minor CMake work).
+- Verifying libfreenect's POSIX path works without our `unistd.h` shim (it should — POSIX system header exists natively).
+- CI Linux build with `freenect` enabled.
+
+Targeted post-Stage-5 alongside MediaPipe — same contributors likely care about both.
 
 ## What we are NOT doing in v1.0
 
-- XAUDIO2 microphone integration. Kinect mic array is a separate, large effort. Tracked separately as v2.0 scope.
+- XAUDIO2 microphone integration. Kinect mic array is a separate, large effort. Tracked as v2.0 scope.
 - Azure Kinect SDK. EOL'd by Microsoft, libdepthengine is closed-source. Skip.
 - VR tracker / SlimeVR / Vive proxy. Suggested in upstream issue #2302 but couples our project to VR ecosystems we don't want to maintain.
-- Multi-Kinect setups (used in some research demos). Out of scope.
-- Recording/replaying gameplay video. Out of scope; that's xenia's job, not ours.
+- Multi-Kinect setups (research demos). Out of scope.
+- Recording/replaying gameplay video. That's xenia's job, not ours.
 
 ## Done criteria for v1.0
 
-- All five reference titles boot to playable state with the recorded backend and a per-game fixture.
-- libfreenect Linux backend works end-to-end with at least Kinect Adventures and Fruit Ninja Kinect.
-- All NUI code paths covered by CI tests using fixtures.
-- Pre-built Linux + Windows binaries on GitHub Releases.
-- Documented setup path for a new user.
+- Stage 4 M6 verified end-to-end on Kinect Adventures (bootstrap → main menu).
+- Stage 5 real skeleton tracking working at least on Kinect Adventures.
+- One additional reference title (Fruit Ninja Kinect or Kinect Sports) playable.
+- Pre-built Windows binaries on GitHub Releases.
+- Documented setup path for a new user (`docs/getting-started.md` post-M6).
 - An average of less than one hour of upstream-rebase pain per week.
