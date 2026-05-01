@@ -4,39 +4,32 @@ This document describes how NUI emulation slots into Xenia's existing structure,
 
 ## Where NUI lives
 
-Xenia's HLE (high-level emulation) handles peripherals through `src/xenia/hid/`. Kinectix adds a parallel subdirectory:
+Xenia's HLE (high-level emulation) handles peripherals through `src/xenia/hid/`. Kinectix adds a parallel subdirectory. See [STRUCTURE.md](STRUCTURE.md) for per-file status flags. High-level layout:
 
 ```
 src/xenia/
 ├── hid/
 │   ├── input_system.cc           # existing controller/HID dispatch
 │   ├── ...
-│   └── nui/                      # NEW
+│   └── nui/                      # ✅ landed
 │       ├── nui_backend.h         # INuiBackend interface
-│       ├── nui_manager.cc        # Singleton that owns the active backend
-│       ├── nui_manager.h
-│       ├── recorded/
-│       │   ├── recorded_backend.cc
-│       │   ├── recorded_backend.h
-│       │   ├── xnuirec_reader.cc
-│       │   ├── xnuirec_writer.cc
-│       │   └── xnuirec.fbs       # flatbuffer schema (or .proto)
-│       ├── freenect/
-│       │   ├── freenect_backend.cc        # Kinect v1, build-flagged
-│       │   ├── freenect_backend.h
-│       │   ├── freenect2_backend.cc       # Kinect v2, build-flagged
-│       │   └── freenect2_backend.h
-│       ├── mediapipe/
-│       │   ├── mediapipe_backend.cc       # webcam + ML, build-flagged
-│       │   └── mediapipe_backend.h
-│       └── tests/
-│           ├── recorded_backend_test.cc
-│           ├── nui_manager_test.cc
-│           └── fixtures/
-│               ├── kinect_adventures_idle.xnuirec
-│               └── ...
+│       ├── nui_manager.{h,cc}    # Singleton that owns the active backend
+│       ├── nui_constants.h       # NUI_SKELETON_POSITION_*, capability flags
+│       ├── null/                 # ✅ default no-op backend
+│       ├── recorded/             # ⏸ Stage 3 deprioritized; stub kept
+│       │   └── xnuirec.fbs       # schema preserved for post-v1.0 CI
+│       ├── freenect/             # 🚧 Stage 4 M2+ (Kinect v1)
+│       └── mediapipe/            # ⏳ Stage 5 candidate
 └── kernel/xam/
-    └── xam_nui.cc                # MODIFIED — routes XAM NUI syscalls to NuiManager
+    ├── xam_nui.cc                # ✅ MODIFIED — Stage 2 telemetry, M3+ routes
+    │                             #    XamNuiSkeletonGet*/XamNuiGetDeviceStatus
+    │                             #    to NuiManager
+    └── apps/xam_app.cc           # ✅ MODIFIED — Stage 2.5 XamUnk2B001 stub
+
+third_party/                      # ✅ Stage 4 M2
+├── libfreenect/                  # submodule pinned to 09a1f09 (2024-01-06)
+├── freenect-msvc-compat/         # MSVC POSIX shim (unistd.h)
+└── libusb/                       # already vendored upstream
 ```
 
 The choice of `hid/nui/` rather than `kernel/xam/nui/` is deliberate: the device backends are HID-shaped (they produce input state at a tick rate). The XAM NUI syscalls in `kernel/xam/xam_nui.cc` are the kernel-side surface that calls into `NuiManager` to fetch state, just as the existing controller code calls into `InputSystem`.
@@ -169,13 +162,14 @@ Color/depth pixels are heavyweight — we make them optional per-frame so test f
 
 ## XAM NUI integration
 
-The existing `xam_nui.cc` in upstream Xenia is mostly empty stubs. Kinectix rewrites it to:
+The existing `xam_nui.cc` in upstream Xenia is mostly empty stubs. Kinectix evolves it incrementally:
 
-1. On Xbox guest call to e.g. `XamNuiGetSkeletonCapabilities`, return capabilities derived from `NuiManager::ActiveBackend()`.
-2. On `XamNuiSkeletonGetNextFrame` (or whatever the canonical name is — confirmed during Stage 0), call `backend->PollSkeleton(index)` and translate the result into the guest-side struct layout.
-3. Maintain a mapping table from XAM NUI function ordinals to `INuiBackend` methods.
+1. **Stage 2 (✅):** Telemetry tracer wraps every export with `XE_NUI_TRACE` macro — logs entry, ordinal, arguments through `XELOGI`. Cost when off is one global-bool branch (predicted not-taken via `XE_UNLIKELY`).
+2. **Stage 2.5 (✅):** `XamNuiGetDeviceStatus` broadcasts `XN_SYS_NUI_HARDWARESTATUSCHANGED` on first call. Companion stub for `XamUnk2B001` (XAM `0x0002B001`) lives in `apps/xam_app.cc`. These are the two specific kernel-side calls Kinect Adventures gates on at the bootstrap screen.
+3. **Stage 4 M3+ (⏳):** Routes `XamNuiSkeletonGet*` and `XamNuiGetDeviceStatus` into `NuiManager::ActiveBackend()->Poll*` / `IsConnected()`. Translates `INuiBackend::SkeletonFrame` into guest-side struct layout (exact layout from Stage 0 telemetry; `xenia-canary` upstream definitions are stubs and may need confirmation against runtime behavior).
+4. **Stage 4 M5 (⏳):** `XamNuiSkeletonGetNextFrame` first call broadcasts `kXNotificationSystemNUISkeletonTrackingStatusChanged`.
 
-The exact list of XAM NUI functions called by reference titles is unknown until Stage 0 telemetry runs. The interface above is sized to plausibly cover them, but we expect to grow it.
+Empirical XAM NUI surface area observed against Kinect Adventures bootstrap: `XamNuiGetDeviceStatus`, `XamShowNuiTroubleshooterUI`. Other titles will surface more — the interface above is sized to cover them, but we expect to extend `INuiBackend` as we hit real titles past KA in Stage 4 M6+.
 
 ## Threading
 
