@@ -7,6 +7,8 @@
  ******************************************************************************
  */
 
+#include <atomic>
+
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/emulator.h"
@@ -46,6 +48,42 @@ namespace xam {
       XELOGI("[nui] " __VA_ARGS__);          \
     }                                        \
   } while (0)
+
+// Kinectix Stage 2 finding — Kinect Adventures (TitleID 4D5308ED) and other
+// titles built against the launch NUI XDK do not poll XamNuiGetDeviceStatus
+// after the initial probe. Instead they register a notify listener
+// (XamNotifyCreateListener + XNotifyGetNext) and wait for the system to
+// broadcast kXNotificationSystemNUIHardwareStatusChanged. With a null
+// backend nothing ever broadcasts that notification, so the title stalls on
+// its "stand in front of sensor" UI even when allow_nui_initialization=true
+// makes XamNuiGetDeviceStatus return success.
+//
+// To unblock that bootstrap path we synthesize a single
+// kXNotificationSystemNUIHardwareStatusChanged broadcast the first time a
+// title queries device status while allow_nui_initialization is set. The
+// data payload is 1 (low bit = "device connected"); real titles inspect a
+// bitmask but the launch-era NUI runtime accepts the low bit alone.
+//
+// Without a real backend producing skeletons the title will still stall on
+// the next gate (skeleton detection), but this notification gets us past
+// the first event-driven barrier and exposes more of the call tree to
+// telemetry, which is the whole point of Stage 2.
+static std::atomic<bool> g_nui_status_broadcasted{false};
+
+static void MaybeBroadcastNuiHardwareStatus() {
+  if (!cvars::allow_nui_initialization) {
+    return;
+  }
+  bool expected = false;
+  if (!g_nui_status_broadcasted.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  XELOGI(
+      "[nui] broadcasting kXNotificationSystemNUIHardwareStatusChanged(1) "
+      "(allow_nui_initialization=true, first device-status probe)");
+  kernel_state()->BroadcastNotification(
+      kXNotificationSystemNUIHardwareStatusChanged, 1);
+}
 
 // https://web.cs.ucdavis.edu/~okreylos/ResDev/Kinect/MainPage.html
 
@@ -91,6 +129,11 @@ dword_result_t XamNuiGetDeviceStatus_entry(
 
   status_ptr.Zero();
   status_ptr->status = cvars::allow_nui_initialization;
+
+  // Fire the hardware-status notification once per emulator session. See
+  // the comment on MaybeBroadcastNuiHardwareStatus for the rationale.
+  MaybeBroadcastNuiHardwareStatus();
+
   return cvars::allow_nui_initialization ? X_ERROR_SUCCESS : 0xC0050006;
 }
 DECLARE_XAM_EXPORT1(XamNuiGetDeviceStatus, kNone, kStub);

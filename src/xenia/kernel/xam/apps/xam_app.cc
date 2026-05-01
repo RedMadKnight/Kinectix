@@ -155,6 +155,24 @@ X_HRESULT XamApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
              data->deployment_type_ptr.get(), data->overlapped_ptr.get());
       return X_E_SUCCESS;
     }
+    case 0x0002B001: {
+      // Kinectix Stage 2 finding — observed from Kinect Adventures
+      // (TitleID 4D5308ED) shortly after XamNuiGetDeviceStatus succeeds.
+      // The buffer is a single 4-byte word; the title appears to use this
+      // message as a NUI-related XAM round-trip during sensor bootstrap
+      // (the numeric ID sits in the same 0x0002Bxxx band as 0x0002B003,
+      // which is also a NUI-era stub). The message is fired regardless of
+      // whether anyone is in front of the sensor, so a success-stub here
+      // is a safe step that lets the title progress past its current
+      // event-driven stall. Refine to a real handler once we have a
+      // backend producing skeletons and can observe what the title does
+      // with non-zero data.
+      uint32_t arg = (buffer_length >= sizeof(uint32_t))
+                         ? xe::load_and_swap<uint32_t>(buffer)
+                         : 0u;
+      XELOGD("XamUnk2B001(arg={:08X}, len={:08X}), stub", arg, buffer_length);
+      return X_E_SUCCESS;
+    }
     case 0x0002B003: {
       // Games used in:
       // 4D5309C9
