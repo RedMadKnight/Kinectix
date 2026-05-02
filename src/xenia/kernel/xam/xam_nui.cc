@@ -12,6 +12,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/emulator.h"
+#include "xenia/hid/nui/nui_manager.h"
 #include "xenia/kernel/kernel_flags.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
@@ -178,9 +179,30 @@ dword_result_t XamNuiGetDepthCalibration_entry(lpdword_t unk1) {
 DECLARE_XAM_EXPORT1(XamNuiGetDepthCalibration, kNone, kStub);
 
 // Skeleton
+//
+// Kinectix Stage 4 M4 — when a NUI backend is installed, advertise
+// skeleton slot 0 as "best" whenever the backend reports both connected
+// and skeleton-capable. The fake T-pose emitter in FreenectBackend
+// satisfies this on real hardware; the recorded backend satisfies it
+// when a fixture with skeleton data is loaded; the null backend never
+// satisfies it.
+//
+// Returning 0 here lets guest titles that gate on "is anybody being
+// tracked" advance to their next stage. The real Xbox 360 NUI runtime
+// returns -1 when no skeleton is being tracked, so we fall back to
+// 0xffffffffffffffff (sign-extended -1) when the backend has no data
+// to offer.
 qword_result_t XamNuiSkeletonGetBestSkeletonIndex_entry(int_t unk) {
   XE_NUI_TRACE("XamNuiSkeletonGetBestSkeletonIndex(unk={})",
                static_cast<int32_t>(unk));
+  auto* nui = xe::hid::nui::NuiManager::Instance();
+  if (nui != nullptr) {
+    auto* backend = nui->backend();
+    if (backend != nullptr && backend->IsConnected() &&
+        backend->SupportsSkeleton()) {
+      return 0;
+    }
+  }
   return 0xffffffffffffffff;
 }
 DECLARE_XAM_EXPORT1(XamNuiSkeletonGetBestSkeletonIndex, kNone, kStub);

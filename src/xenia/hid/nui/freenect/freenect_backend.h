@@ -48,12 +48,18 @@ namespace freenect {
 //   * Poll*() reads the latest committed slot from the triple buffer
 //     using sequence-counter verification, never blocks.
 //
-// Stage 4 M3 scope:
+// Stage 4 M3 scope (delivered):
 //   * Open device 0 (camera subdevice), 640x480 11-bit depth, 640x480
 //     RGB video.
 //   * No tilt / motor / accelerometer use.
-//   * No skeleton tracking (M4 fills in fake T-pose; M5 wires the
-//     SkeletonTrackingStatusChanged notification).
+//
+// Stage 4 M4 scope (this file):
+//   * PollSkeleton(0) returns a hardcoded T-pose at ~30 Hz so guest
+//     code that gates on "is anybody being tracked" can advance.
+//   * No real skeleton inference yet — Stage 5 plugs in MediaPipe /
+//     NiTE2 / etc. The fake skeleton lets us validate the XAM NUI
+//     glue end-to-end before we add a tracker dependency.
+//   * SkeletonTrackingStatusChanged notification arrives in M5.
 // ----------------------------------------------------------------------------
 
 class FreenectBackend final : public INuiBackend {
@@ -155,6 +161,18 @@ class FreenectBackend final : public INuiBackend {
   // so that NuiManager::HostUsToGuestTimestamp can subtract its own epoch
   // without negative values.
   uint64_t start_us_ = 0;
+
+  // ---------------------------------------------------------------------------
+  // Stage 4 M4: fake T-pose skeleton emission state.
+  //
+  // PollSkeleton(0) hands out a hardcoded T-pose every ~33 ms (i.e. a
+  // simulated 30 Hz tracker). last_skeleton_emit_us_ holds the host time
+  // of the most recent emission so the rate limiter can decide when to
+  // produce the next frame; skeleton_emit_count_ is used only to throttle
+  // the diagnostic XELOGD that confirms the path is alive.
+  // ---------------------------------------------------------------------------
+  uint64_t last_skeleton_emit_us_ = 0;
+  uint64_t skeleton_emit_count_ = 0;
 };
 
 }  // namespace freenect
