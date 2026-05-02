@@ -64,13 +64,13 @@ void NuiManager::Setup() {
   g_instance->backend_ = g_instance->CreateBackendFromCvars();
 
   if (!g_instance->backend_->Initialize()) {
-    XELOGE("NUI backend '%s' failed to Initialize(); falling back to null.",
-           g_instance->backend_->Name().c_str());
+    XELOGE("NUI backend '{}' failed to Initialize(); falling back to null.",
+           g_instance->backend_->Name());
     g_instance->backend_ = std::make_unique<NullNuiBackend>();
     g_instance->backend_->Initialize();
   }
 
-  XELOGI("NUI: %s", g_instance->StatusString().c_str());
+  XELOGI("NUI: {}", g_instance->StatusString());
 }
 
 void NuiManager::Shutdown() {
@@ -140,9 +140,9 @@ std::unique_ptr<INuiBackend> NuiManager::CreateBackendFromCvars() {
 #endif
 
   XELOGW(
-      "Unknown or unbuilt NUI backend '%s'. Falling back to null. "
+      "Unknown or unbuilt NUI backend '{}'. Falling back to null. "
       "Did you forget a build flag (KINECTIX_NUI_FREENECT etc.)?",
-      kind.c_str());
+      kind);
   return std::make_unique<NullNuiBackend>();
 }
 

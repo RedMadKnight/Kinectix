@@ -1,8 +1,9 @@
-# Kinectix NUI library — INuiBackend, NuiManager, recorded playback backend.
+# Kinectix NUI library — INuiBackend, NuiManager, recorded playback backend,
+# plus the optional libfreenect (Kinect v1) backend.
 #
 # Optional backends (libfreenect, libfreenect2, MediaPipe) are gated by
-# CMake options and not yet implemented; the option declarations exist
-# so that future enable-and-build works without surgery.
+# CMake options. libfreenect is implemented (Stage 4 M3); the others
+# are still placeholders waiting for their backend sources.
 
 add_library(xenia-hid-nui STATIC)
 
@@ -30,10 +31,14 @@ option(KINECTIX_NUI_MEDIAPIPE "Build the MediaPipe (webcam pose) backend"  OFF)
 
 if(KINECTIX_NUI_FREENECT)
   target_compile_definitions(xenia-hid-nui PUBLIC XE_KINECTIX_NUI_FREENECT=1)
-  # TODO: target_sources(... freenect/freenect_backend.cc) once written.
-  # TODO: find_package(Freenect REQUIRED) or vendored equivalent.
-  message(STATUS "KINECTIX_NUI_FREENECT enabled, but backend sources are not "
-                 "yet implemented. Stage 2 in ROADMAP.md.")
+  target_sources(xenia-hid-nui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/freenect/freenect_backend.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/freenect/freenect_backend.h
+  )
+  # libfreenect target is defined in third_party/CMakeLists.txt (Windows-only,
+  # built on top of our libusb static target). Public include of <libfreenect.h>
+  # is propagated via target_include_directories on `freenect`.
+  target_link_libraries(xenia-hid-nui PRIVATE freenect)
 endif()
 
 if(KINECTIX_NUI_FREENECT2)
