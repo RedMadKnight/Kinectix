@@ -79,11 +79,40 @@ static void MaybeBroadcastNuiHardwareStatus() {
   if (!g_nui_status_broadcasted.compare_exchange_strong(expected, true)) {
     return;
   }
+
+  // Stage 4 M5 — payload bitmask matches what XamNuiGetDeviceStatus::status
+  // returns (0x44 = sensor present + ready). Earlier versions sent the
+  // boolean 1 here, which Kinect Adventures rejected: the listener with
+  // mask 0x87 (NUI bit 0x80 included) saw a value that didn't match the
+  // "ready" pattern and the title fell through to XamShowNuiHardwareRequiredUI.
+  auto* nui_manager = xe::hid::nui::NuiManager::Instance();
+  const bool backend_connected = nui_manager != nullptr &&
+                                 nui_manager->backend() != nullptr &&
+                                 nui_manager->backend()->IsConnected();
+  const uint32_t hw_payload = backend_connected ? 0x44u : 0x40u;
   XELOGI(
-      "[nui] broadcasting kXNotificationSystemNUIHardwareStatusChanged(1) "
-      "(allow_nui_initialization=true, first device-status probe)");
+      "[nui] broadcasting kXNotificationSystemNUIHardwareStatusChanged({:#x}) "
+      "(allow_nui_initialization=true, first device-status probe, "
+      "backend_connected={})",
+      hw_payload, backend_connected);
   kernel_state()->BroadcastNotification(
-      kXNotificationSystemNUIHardwareStatusChanged, 1);
+      kXNotificationSystemNUIHardwareStatusChanged, hw_payload);
+
+  // Stage 4 M5 — KA 4D5308ED renders its "Is anybody there?" calibration
+  // screen and then waits on shared-memory NUI state plus a NUIUIApproach
+  // notification (0x0006001B) that signals "a player has entered the
+  // sensor's tracking volume". With our fake T-pose backend feeding the
+  // skeleton path, we synthesize that approach event right after the
+  // hardware-ready signal so the title can advance past the calibration
+  // gate. Payload 1 = "approach detected"; real hardware sends a richer
+  // bitmask but the launch-era runtime accepts the low bit alone, mirroring
+  // how the hardware-status broadcast was originally tuned.
+  if (backend_connected) {
+    XELOGI(
+        "[nui] broadcasting kXNotificationSystemNUIUIApproach(1) "
+        "(synthetic — fake T-pose backend asserts player presence)");
+    kernel_state()->BroadcastNotification(kXNotificationSystemNUIUIApproach, 1);
+  }
 }
 
 // https://web.cs.ucdavis.edu/~okreylos/ResDev/Kinect/MainPage.html
@@ -129,7 +158,33 @@ dword_result_t XamNuiGetDeviceStatus_entry(
   */
 
   status_ptr.Zero();
-  status_ptr->status = cvars::allow_nui_initialization;
+
+  // Kinectix Stage 4 M5 — payload that lets Kinect Adventures (and other
+  // launch-era NUI titles) progress past the device-status probe.
+  //
+  // Reverse-engineered from XAM build 0.0.13599.32: the `status` field is
+  // a bitmask, not a boolean. Observed values (per the comment block
+  // above): 0x44, 0x40, 0x20. Best-effort interpretation:
+  //   * 0x40 — sensor visible to the bus.
+  //   * 0x04 — sensor calibrated and ready to stream.
+  //   * 0x44 — both, the "good" path.
+  //
+  // Empirically: KA 4D5308ED was rejecting our previous payload
+  // (`status = cvars::allow_nui_initialization` ⇒ value 1) and looping
+  // into XamShowNuiTroubleshooterUI three times before stalling. Setting
+  // status = 0x44 when a backend is connected unblocks that path; when
+  // the user enables NUI but no backend has connected, we report 0x40
+  // ("present but not ready"), which is closer to what real hardware
+  // would report during warm-up than the meaningless 0x01.
+  auto* nui_manager = xe::hid::nui::NuiManager::Instance();
+  const bool backend_connected = nui_manager != nullptr &&
+                                 nui_manager->backend() != nullptr &&
+                                 nui_manager->backend()->IsConnected();
+  if (cvars::allow_nui_initialization) {
+    status_ptr->status = backend_connected ? 0x44 : 0x40;
+  }
+  XE_NUI_TRACE("XamNuiGetDeviceStatus → status={:#x} backend_connected={}",
+               static_cast<uint32_t>(status_ptr->status), backend_connected);
 
   // Fire the hardware-status notification once per emulator session. See
   // the comment on MaybeBroadcastNuiHardwareStatus for the rationale.
@@ -597,6 +652,33 @@ void XamNuiPlayerEngagementUpdate_entry(qword_t unk1, unknown_t unk2,
   */
 }
 DECLARE_XAM_EXPORT1(XamNuiPlayerEngagementUpdate, kNone, kStub);
+
+// ---------------------------------------------------------------------------
+// Kinectix Stage 4 M5 — XamXStudioRequest stub.
+//
+// Referenced in xam_table.inc as ordinal 0x686, marked `kFunction` but had
+// no `_entry` shim, so Kinect Adventures imported it (`F 820006A4 ...
+// 686 (1670) !! XamXStudioRequest` in the title's import dump) and got an
+// undefined-trampoline call. Reverse-engineered XamNuiGetDeviceStatus
+// notes (header of this file) describe the call as
+// `XamXStudioRequest(6, &var)` where:
+//   * arg0 = 6  (feature query for "is NUI/Kinect support enabled")
+//   * arg1 = pointer to a 4-byte output, expected to receive a feature
+//            mask whose high bit (0x80000000) signals "disabled".
+// For the launch-era NUI happy path we want: return 0 (success) AND
+// `*var = 0` (no error bit set). We zero the output buffer when given a
+// non-null pointer and ignore the feature ID — there is no plausible
+// reason for Kinectix to gate features off through this query.
+// ---------------------------------------------------------------------------
+dword_result_t XamXStudioRequest_entry(dword_t feature_id, lpdword_t out_ptr) {
+  XE_NUI_TRACE("XamXStudioRequest(feature_id={}, out_ptr={:08X})",
+               static_cast<uint32_t>(feature_id), out_ptr.guest_address());
+  if (out_ptr) {
+    *out_ptr = 0;
+  }
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamXStudioRequest, kNone, kStub);
 
 }  // namespace xam
 }  // namespace kernel
