@@ -116,3 +116,6 @@ node_modules/.bin/
 /cache0
 /devkit
 recent.toml
+out/
+xenia_release/
+build/version.h

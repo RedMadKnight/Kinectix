@@ -24,6 +24,72 @@ namespace freenect {
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// Stage 4 M4: fake T-pose skeleton.
+//
+// All values are sensor-relative meters using the standard NUI axis
+// convention from nui_backend.h: +x to the player's right, +y up, +z
+// forward (away from sensor). The pose places a ~1.78 m subject standing
+// 2.5 m in front of the sensor with arms held horizontally — the canonical
+// calibration pose Kinect titles use as a "ready" gesture.
+//
+// Joint heights are anatomical proportions of an average adult male.
+// Producing exact NuiSkeletonHeader::FloorClipPlane data is not in scope
+// for M4; the floor is implicitly y=0 here, which matches the default a
+// guest title sees from a freshly-initialized sensor.
+//
+// Order matches the SkeletonPosition enum in nui_constants.h (do NOT
+// reorder — guest consumers index by raw enum value).
+// ---------------------------------------------------------------------------
+constexpr float kFakeTposeStandDistanceM = 2.5f;  // distance from sensor
+
+struct TposeJointInit {
+  SkeletonPosition slot;
+  float x;
+  float y;
+};
+
+constexpr std::array<TposeJointInit, kSkeletonPositionCount> kFakeTposeXY = {{
+    {kSkeletonPositionHipCenter, 0.00f, 0.95f},
+    {kSkeletonPositionSpine, 0.00f, 1.20f},
+    {kSkeletonPositionShoulderCenter, 0.00f, 1.45f},
+    {kSkeletonPositionHead, 0.00f, 1.65f},
+    {kSkeletonPositionShoulderLeft, -0.20f, 1.45f},
+    {kSkeletonPositionElbowLeft, -0.45f, 1.45f},
+    {kSkeletonPositionWristLeft, -0.70f, 1.45f},
+    {kSkeletonPositionHandLeft, -0.78f, 1.45f},
+    {kSkeletonPositionShoulderRight, 0.20f, 1.45f},
+    {kSkeletonPositionElbowRight, 0.45f, 1.45f},
+    {kSkeletonPositionWristRight, 0.70f, 1.45f},
+    {kSkeletonPositionHandRight, 0.78f, 1.45f},
+    {kSkeletonPositionHipLeft, -0.10f, 0.92f},
+    {kSkeletonPositionKneeLeft, -0.10f, 0.50f},
+    {kSkeletonPositionAnkleLeft, -0.10f, 0.10f},
+    {kSkeletonPositionFootLeft, -0.10f, 0.02f},
+    {kSkeletonPositionHipRight, 0.10f, 0.92f},
+    {kSkeletonPositionKneeRight, 0.10f, 0.50f},
+    {kSkeletonPositionAnkleRight, 0.10f, 0.10f},
+    {kSkeletonPositionFootRight, 0.10f, 0.02f},
+}};
+
+void FillFakeTposeFrame(SkeletonFrame* frame, uint64_t host_timestamp_us) {
+  frame->skeleton_index = 0;
+  frame->state = kSkeletonTracked;
+  frame->host_timestamp_us = host_timestamp_us;
+  for (const auto& init : kFakeTposeXY) {
+    auto& j = frame->joints[init.slot];
+    j.x = init.x;
+    j.y = init.y;
+    j.z = kFakeTposeStandDistanceM;
+    j.tracking_state = kSkeletonPositionTracked;
+  }
+}
+
+// Cap the fake tracker at ~30 Hz to match a real Kinect skeleton stream.
+// Going faster is pointless — guest titles poll once per render frame and
+// we'd just waste CPU producing identical data.
+constexpr uint64_t kFakeSkeletonPeriodUs = 1'000'000ull / 30ull;
+
 uint64_t MonotonicNowUs() {
   using clock = std::chrono::steady_clock;
   return std::chrono::duration_cast<std::chrono::microseconds>(
@@ -241,9 +307,12 @@ bool FreenectBackend::IsConnected() const {
 }
 
 uint32_t FreenectBackend::Capabilities() const {
-  // Stage 4 M3 scope: depth + color only. M4 will OR-in kCapabilitySkeleton
-  // once the fake T-pose path is wired up.
-  return kCapabilityDepth | kCapabilityColor;
+  // Depth + color come straight from libfreenect; the skeleton "capability"
+  // is currently fulfilled by the fake T-pose emitter in PollSkeleton (M4).
+  // Stage 5 will replace the fake skeleton with a real tracker but the cap
+  // bit stays the same — guest software cannot tell which source produced
+  // the joints.
+  return kCapabilityDepth | kCapabilityColor | kCapabilitySkeleton;
 }
 
 void FreenectBackend::ReaderThreadMain() {
@@ -411,11 +480,48 @@ void FreenectBackend::OnVideoFrame(const uint8_t* rgb_pixels,
 // Reader-side polling.
 // --------------------------------------------------------------------------
 
-std::optional<SkeletonFrame> FreenectBackend::PollSkeleton(uint32_t /*index*/) {
-  // Stage 4 M3: no skeleton tracking. M4 wires fake T-pose, M5 adds the
-  // SystemNUISkeletonTrackingStatusChanged broadcast, Stage 5 plugs in
-  // real tracking (MediaPipe / NiTE2 / etc.).
-  return std::nullopt;
+std::optional<SkeletonFrame> FreenectBackend::PollSkeleton(uint32_t index) {
+  // Stage 4 M4 — synthetic T-pose tracker.
+  //
+  // We expose a single slot (index 0). Every other slot returns nullopt,
+  // matching how a real Kinect would advertise unused skeleton slots when
+  // only one player is in frame. M5/M6 will refine this once we know
+  // exactly which guest call sites query non-zero indices.
+  //
+  // The emitter is rate-limited to ~30 Hz against the host steady clock.
+  // INuiBackend's contract says we must not return the same frame twice;
+  // returning nullopt between emissions is the cheapest way to honor that
+  // and lets guest pollers spin without amplifying our log volume.
+  if (index != 0) {
+    return std::nullopt;
+  }
+  if (!connected_.load(std::memory_order_acquire)) {
+    return std::nullopt;
+  }
+
+  const uint64_t now = HostNowUs();
+  if (last_skeleton_emit_us_ != 0 &&
+      now - last_skeleton_emit_us_ < kFakeSkeletonPeriodUs) {
+    return std::nullopt;
+  }
+  last_skeleton_emit_us_ = now;
+  ++skeleton_emit_count_;
+
+  SkeletonFrame frame;
+  FillFakeTposeFrame(&frame, now);
+
+  // Diagnostic — first emission and then once per second. XELOGD is gated
+  // by --log_level=3, so this is silent under the default info level and
+  // doesn't pollute production logs once Stage 5 lands.
+  if (skeleton_emit_count_ == 1 || (skeleton_emit_count_ % 30) == 0) {
+    const auto& head = frame.joints[kSkeletonPositionHead];
+    XELOGD(
+        "freenect: fake T-pose emit #{} head=({:.2f}, {:.2f}, {:.2f}) "
+        "state=tracked",
+        skeleton_emit_count_, head.x, head.y, head.z);
+  }
+
+  return frame;
 }
 
 std::optional<DepthFrame> FreenectBackend::PollDepth() {
